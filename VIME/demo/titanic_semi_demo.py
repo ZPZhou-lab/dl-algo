@@ -1,4 +1,5 @@
 import tensorflow as tf
+from tensorflow import keras
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 
@@ -7,7 +8,8 @@ from sklearn.metrics import accuracy_score
 import sys
 sys.path.append("../")
 
-from estimator import VIMESelfEstimator
+from estimator import VIMESemiEstimator, VIMESelfEstimator
+from model import VIMESelf, Encoder
 import utils
 
 if __name__ == "__main__":
@@ -15,6 +17,7 @@ if __name__ == "__main__":
     print("load Titanic data...")
     (x_train, y_train), (x_valid, y_valid), cat_cols = utils.load_titanic_dataset()
 
+    # create VIMESelf model
     # define params
     params = {
         "latent_sz": 4,
@@ -25,37 +28,23 @@ if __name__ == "__main__":
         "p_m": 0.25,
         "cat_cols": cat_cols
     }
-    # define train input_fn
-    train_input_fn = tf.estimator.inputs.numpy_input_fn(
-        x={"X_unlabel": x_train},
-        y=y_train,
-        batch_size=1024,
-        num_epochs=None,
-        shuffle=True
-    )
-    # define eval input_fn
-    eval_input_fn = tf.estimator.inputs.numpy_input_fn(
-        x={"X_unlabel": x_valid},
-        num_epochs=1,
-        shuffle=False
-    )
 
-    # create estimator
-    estimator = VIMESelfEstimator(model_dir="./model_titanic",params=params)
-
-    # train
-    num_epochs = 3
-    for i in range(num_epochs):
-        # TRAIN
-        train_res = estimator.train(input_fn=train_input_fn, steps=100)
-        # EVAL
-        eval_res = estimator.evaluate(input_fn=eval_input_fn)
+    # create Encoder with scope prefix "encoder"
+    with tf.variable_scope("encoder"):
+        encoder = Encoder(params["num_dims"], num_hiddens=params["latent_sz"], cat_cols=params["cat_cols"], cat_embed_dims=1, dropout=params["dropout"])
+        encoder.build(input_shape=(None, params["num_dims"]))
     
-    # PREDICT
-    # get encoded latent representation
-    print("get latent representation...")
-    x_latent_train = utils.get_latent_representation(x_train, estimator)
-    x_latent_valid = utils.get_latent_representation(x_valid, estimator)
+    # load encoder checkpoint
+    saver = tf.train.Saver(var_list=encoder.variables)
+    
+    with tf.Session() as sess:
+        # restore encoder checkpoint
+        saver.restore(sess, "./model_titanic/model.ckpt-300")
+        print("encoder restored.")
+
+        # get latent representation
+        x_latent_train = sess.run(encoder(x_train))
+        x_latent_valid = sess.run(encoder(x_valid))
 
     # build classifier with latent feature
     print("build classifier with latent feature...")
@@ -66,5 +55,9 @@ if __name__ == "__main__":
     print("train acc using latent feature: %.4f"%(train_acc))
     print("valid acc using latent feature: %.4f"%(valid_acc))
 
-    # plot latent feature
-    utils.plot_latent_representation(x_latent_train, y_train)
+
+    
+    
+
+
+

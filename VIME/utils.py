@@ -208,30 +208,34 @@ def build_unsupervised_loss(vime_semi : tf.keras.Model, X_unlabel : tf.Tensor, K
     
     return loss / K
 
-def build_selfsupervised_loss(vime_semi : tf.keras.Model, X_unlabel : tf.Tensor, p_m, alpha : float=1.0, **kwargs):
+def build_selfsupervised_loss(vime_self : tf.keras.Model, X_unlabel : tf.Tensor, p_m, alpha : float=1.0, **kwargs):
     """
     Calculate the self-supervised loss for VIME model.
 
     Parameters
     ----------
-    vime_semi : tf.keras.Model
-        The VIME Semi-supervised model.
+    vime_self : tf.keras.Model
+        The VIME Self-supervised model.
     X_unlabel : tf.Tensor
         The unlabelled data matrix with shape (batch_sz, num_dims).
+    p_m : float or array_like of floats
+        The probability to corrupt feature for each column.
+    alpha : float
+        The weight for reconstruction loss in self-supervised learning.
     """
 
     # create corrupted data
     mask = mask_generator(p_m, X_unlabel)
-    X_tilde, mask_tilde = pretext_generator(mask, X_unlabel, vime_semi.num_dims)
+    X_tilde, mask_tilde = pretext_generator(mask, X_unlabel, vime_self.num_dims)
     
     # estimate mask and original feature (include numerical & categorical) using corrupted data
-    X_num_hat, X_cat_hat, mask_logits = vime_semi(X_tilde, **kwargs)
+    X_num_hat, X_cat_hat, mask_logits = vime_self(X_tilde, **kwargs)
 
     # calculate loss
     # part 1: mask estimatation loss
     loss_mask = tf.losses.sigmoid_cross_entropy(mask_tilde, mask_logits)
     # part 2: reconstruction loss
-    loss_recon = build_reconstruction_loss(X_unlabel, X_num_hat, X_cat_hat, vime_semi.num_idx, vime_semi.cat_idx)
+    loss_recon = build_reconstruction_loss(X_unlabel, X_num_hat, X_cat_hat, vime_self.num_idx, vime_self.cat_idx)
     loss_total = loss_mask + alpha * loss_recon
     
     return loss_total
