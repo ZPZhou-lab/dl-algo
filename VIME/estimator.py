@@ -1,8 +1,8 @@
 import tensorflow as tf
 from tensorflow import keras
 from typing import Callable, Union, Any, Tuple
-from . import utils
-from .model import Encoder, VIMESelf, VIMESemi
+import utils
+from model import Encoder, VIMESelf, VIMESemi
 
 # Self-supervised Learning Estimator
 # Self-supervised Learning Estimator

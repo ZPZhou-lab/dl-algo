@@ -225,7 +225,7 @@ def build_selfsupervised_loss(vime_semi : tf.keras.Model, X_unlabel : tf.Tensor,
     X_tilde, mask_tilde = pretext_generator(mask, X_unlabel, vime_semi.num_dims)
     
     # estimate mask and original feature (include numerical & categorical) using corrupted data
-    X_num_hat, X_cat_hat, mask_logits = vime_self(X_tilde, training=training)
+    X_num_hat, X_cat_hat, mask_logits = vime_semi(X_tilde, **kwargs)
 
     # calculate loss
     # part 1: mask estimatation loss

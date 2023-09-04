@@ -2,7 +2,7 @@ import tensorflow as tf
 from tensorflow import keras
 
 from typing import Callable, Union, Any, List, Tuple
-from .utils import fetch_feature_cols
+from utils import fetch_feature_cols
 
 # define Encoder
 class Encoder(tf.keras.Model):
