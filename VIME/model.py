@@ -1,5 +1,4 @@
 import tensorflow as tf 
-from tensorflow import keras
 
 from typing import Callable, Union, Any, List, Tuple
 from utils import fetch_feature_cols
@@ -31,16 +30,16 @@ class Encoder(tf.keras.Model):
         self.num_idx, self.cat_idx, max_num_cat = fetch_feature_cols(num_dims, cat_cols)
         
         # encoder for categorical features
-        self.cat_embed = keras.layers.Embedding(input_dim=max_num_cat, output_dim=cat_embed_dims)
-        self.cat_flat = keras.layers.Flatten()
+        self.cat_embed = tf.keras.layers.Embedding(input_dim=max_num_cat, output_dim=cat_embed_dims)
+        self.cat_flat = tf.keras.layers.Flatten()
 
         # encoder for all features
         num_input_dim = len(self.num_idx)
         cat_input_dim = len(self.cat_idx) * cat_embed_dims
-        self.fc1 = keras.layers.Dense(2*latent_sz, activation="relu")
+        self.fc1 = tf.keras.layers.Dense(2*latent_sz, activation="sigmoid")
         self.fc1.build(input_shape=(None,num_input_dim + cat_input_dim))
-        self.dropout = keras.layers.Dropout(rate=dropout)
-        self.fc2 = keras.layers.Dense(latent_sz, activation="relu")
+        self.dropout = tf.keras.layers.Dropout(rate=dropout)
+        self.fc2 = tf.keras.layers.Dense(latent_sz, activation="sigmoid")
 
         # convert to tf.int32
         self.num_idx = tf.constant(self.num_idx, dtype=tf.int32)
@@ -65,28 +64,32 @@ class VIMESelf(tf.keras.Model):
     """
     The VIME Self-supervised Model.
     """
-    def __init__(self, num_dims : int, cat_cols : dict={}, **kwargs):
+    def __init__(self, encoder : tf.keras.Model, num_dims : int, cat_cols : dict={}, **kwargs):
         super(VIMESelf, self).__init__(**kwargs)
         # preprocessing
         self.num_idx, self.cat_idx, max_num_cat = fetch_feature_cols(num_dims, cat_cols)
+        self.num_dims = num_dims
         
+        # add encoder
+        self.encoder = encoder
+
         # create mask estimator and feature estimator
-        self.mask_est = keras.layers.Dense(num_dims)
+        self.mask_est = tf.keras.layers.Dense(num_dims)
         
         # numerical feature estimator
-        self.num_feat_est = keras.layers.Dense(len(self.num_idx)) if len(self.num_idx) > 0 else None
+        self.num_feat_est = tf.keras.layers.Dense(len(self.num_idx)) if len(self.num_idx) > 0 else None
         # categorical feature estimator
         self.num_of_cat = len(self.cat_idx)
-        self.cat_feat_est = keras.layers.Dense(max_num_cat*self.num_of_cat) if self.num_of_cat > 0 else None
+        self.cat_feat_est = tf.keras.layers.Dense(max_num_cat*self.num_of_cat) if self.num_of_cat > 0 else None
 
         # convert to tf.int32
         self.num_idx = tf.constant(self.num_idx, dtype=tf.int32)
         self.cat_idx = tf.constant(self.cat_idx, dtype=tf.int32)
 
-    def call(self, X_latent, **kwargs):
+    def call(self, X_tilde, **kwargs):
         """
-        X_latent : tf.Tensor
-            The latent representation encoded with shape (batch_sz, latent_sz).
+        X_tilde : tf.Tensor
+            The input data matrix with shape (batch_sz, num_dims).
 
         Returns
         ----------
@@ -97,6 +100,9 @@ class VIMESelf(tf.keras.Model):
         mask_hat : tf.Tensor
             The estimated mask vector.
         """
+
+        # get latent representation
+        X_latent = self.encoder(X_tilde, **kwargs)
 
         # estimate mask vector
         mask_hat = self.mask_est(X_latent)
@@ -112,25 +118,27 @@ class VIMESelf(tf.keras.Model):
         
         return num_feat_hat, cat_feat_hat, mask_hat
 
+    # get latent representation
+    def encode(self, X : tf.Tensor, **kwargs):
+        """
+        get latent representation for given input data matrix.
+        """
+        return self.encoder(X, **kwargs)
+
 class VIMESemi(tf.keras.Model):
     def __init__(self, num_dims : int, output_dims : int,  dropout=0.0, **kwargs):
-        super(VIMESemi, self).__init__(**kwargs)        
-        # whehter to train VIMESelf model
-        self.freeze_vime_self = False
-        
+        super(VIMESemi, self).__init__(**kwargs)
         # create predictor
-        self.predictor = keras.models.Sequential([
-            keras.layers.Dense(4*output_dims, activation="relu"),
-            keras.layers.Dropout(rate=dropout),
-            keras.layers.Dense(4*output_dims, activation="relu"),
-            keras.layers.Dropout(rate=dropout),
-            keras.layers.Dense(output_dims)
+        self.predictor = tf.keras.models.Sequential([
+            tf.keras.layers.Dense(4*output_dims, activation="relu"),
+            tf.keras.layers.Dropout(rate=dropout),
+            tf.keras.layers.Dense(4*output_dims, activation="relu"),
+            tf.keras.layers.Dropout(rate=dropout),
+            tf.keras.layers.Dense(output_dims)
         ])
 
         self.num_dims = num_dims
         self.output_dims = output_dims
-        self.num_idx = self.vime_self.num_idx
-        self.cat_idx = self.vime_self.cat_idx
     
     # make prediction
     def call(self, X_latent : tf.Tensor, **kwargs):

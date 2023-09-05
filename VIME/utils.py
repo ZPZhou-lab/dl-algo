@@ -1,5 +1,4 @@
 import tensorflow as tf 
-from tensorflow import keras
 import numpy as np 
 from tensorflow.keras.losses import mean_squared_error, sparse_categorical_crossentropy, binary_crossentropy
 
@@ -16,7 +15,7 @@ from typing import Callable, Union, Any, List, Tuple
 
 # load MNIST dataset
 def load_mnist_dataset(num_cat : int=0):
-    (x_train, y_train), (x_valid, y_valid) = keras.datasets.mnist.load_data()
+    (x_train, y_train), (x_valid, y_valid) = tf.keras.datasets.mnist.load_data()
     # reshape x_train, y_train into a vector
     x_train = np.reshape(x_train, (-1,28*28))
     x_valid = np.reshape(x_valid, (-1,28*28))
@@ -85,7 +84,7 @@ def mask_generator(p_m : Union[float, List[float]], X : tf.Tensor) -> tf.Tensor:
     """
 
     shape = tf.shape(X)
-    mask = keras.backend.random_binomial(shape, p_m, dtype=tf.float32)
+    mask = tf.keras.backend.random_binomial(shape, p_m, dtype=tf.float32)
 
     return mask
 
@@ -160,22 +159,28 @@ def build_reconstruction_loss(X_unlabel : tf.Tensor, X_num_hat : tf.Tensor, X_ca
 
     return loss_recon
 
-def build_supervised_loss(y_true : tf.Tensor, y_pred : tf.Tensor, task : str):
+def build_supervised_loss(y_true : tf.Tensor, y_pred : tf.Tensor, mask : tf.Tensor, task : str):
     """
     Calculate the supervised loss for VIME model.
     """
+    # transform mask into tf.float32
+    mask = tf.cast(mask, tf.float32)
+    
     if task == "multiclass":
-        loss = tf.reduce_mean(sparse_categorical_crossentropy(y_true, y_pred, from_logits=True))
+        loss = tf.reduce_mean(mask * sparse_categorical_crossentropy(y_true, y_pred, from_logits=True))
     elif task == "regression":
-        loss = tf.reduce_mean(mean_squared_error(y_true, y_pred))
+        loss = tf.reduce_mean(mask * mean_squared_error(y_true, y_pred))
     elif task == "binary":
-        loss = tf.reduce_mean(binary_crossentropy(y_true, y_pred, from_logits=True))
+        # transform y_true to have same shape and dtype as y_pred
+        y_true = tf.reshape(y_true, tf.shape(y_pred))
+        y_true = tf.cast(y_true, y_pred.dtype)
+        loss = tf.reduce_mean(mask * binary_crossentropy(y_true, y_pred, from_logits=True))
     else:
         raise ValueError("task must be one of 'multiclass', 'regression', 'binary'.")
 
     return loss
 
-def build_unsupervised_loss(vime_semi : tf.keras.Model, X_unlabel : tf.Tensor, K : int=10, p_m : float=0.2, **kwargs):
+def build_unsupervised_loss(vime_semi : tf.keras.Model, encoder : tf.keras.Model, X_unlabel : tf.Tensor, K : int=10, p_m : float=0.2, **kwargs):
     """
     Calculate the unsupervised loss for VIME model.
 
@@ -183,6 +188,8 @@ def build_unsupervised_loss(vime_semi : tf.keras.Model, X_unlabel : tf.Tensor, K
     ----------
     vime_semi : tf.keras.Model
         The VIME Semi-supervised model.
+    encoder : tf.keras.Model
+        The encoder model.
     X_unlabel : tf.Tensor
         The unlabelled data matrix with shape (batch_sz, num_dims).
     K : int
@@ -193,7 +200,7 @@ def build_unsupervised_loss(vime_semi : tf.keras.Model, X_unlabel : tf.Tensor, K
 
     loss = 0
     # make prediction for original data
-    y_hat = vime_semi(X_unlabel, **kwargs)
+    y_hat = vime_semi(encoder(X_unlabel, **kwargs), **kwargs)
     
     for _ in range(K):
         # create corrupted data
@@ -201,7 +208,7 @@ def build_unsupervised_loss(vime_semi : tf.keras.Model, X_unlabel : tf.Tensor, K
         X_tilde, _ = pretext_generator(mask, X_unlabel, vime_semi.num_dims)
         
         # make prediction for augmented corrupted data
-        y_hat_aug = vime_semi(X_tilde, **kwargs)
+        y_hat_aug = vime_semi(encoder(X_tilde, **kwargs), **kwargs)
 
         # calculate loss
         loss += tf.reduce_mean(mean_squared_error(y_hat, y_hat_aug))
@@ -240,21 +247,24 @@ def build_selfsupervised_loss(vime_self : tf.keras.Model, X_unlabel : tf.Tensor,
     
     return loss_total
 
-def get_latent_representation(X : np.ndarray, estimator : tf.estimator.Estimator):
+def get_latent_representation(estimator : tf.estimator.Estimator, x : dict, y = None):
     # define predict input_fn
-    pred_input_fn = tf.estimator.inputs.numpy_input_fn(x={"X_unlabel": X}, shuffle=False)
-    
+    pred_input_fn = tf.estimator.inputs.numpy_input_fn(x=x, y=y, num_epochs=1, shuffle=False)
     # PREDICT
     pred_gen = estimator.predict(input_fn=pred_input_fn)
 
-    predictions = {"latent": []}
+    predictions = {}
     for pred in pred_gen:
-        predictions["latent"].append(pred["latent"])
-    predictions["latent"] = np.vstack(predictions["latent"])
+        for k,v in pred.items():
+            if k not in predictions:
+                predictions[k] = []
+            predictions[k].append(v)
+    for k,v in predictions.items():
+        predictions[k] = np.vstack(v)
 
-    return predictions["latent"]
+    return predictions
 
-def plot_latent_representation(x_latent_train, y_train):
+def plot_latent_representation(x_latent_train, y_train, fig_path : str):
     # decompose integer into two factors
     def decompose_integer(n):
         factors = []
@@ -290,3 +300,36 @@ def plot_latent_representation(x_latent_train, y_train):
             ax[cnt].legend(loc="upper right")
             cnt += 1
     plt.tight_layout()
+    plt.show()
+    # save figure
+    plt.savefig(fig_path)
+
+def create_encoder_params(params : dict):
+    encoder_params = {
+        "num_dims": params["num_dims"],
+        "latent_sz": params["latent_sz"],
+        "cat_cols": params.get("cat_cols", {}),
+        "cat_embed_dims": params.get("cat_embed_dims", 1),
+        "dropout": params.get("dropout", 0.0)
+    }
+
+    return encoder_params
+
+def pad_labeled_data(x_labeled : np.ndarray, y_labeled : np.ndarray, num_unlabel : int):
+    """
+    pad labeled data with same size as unlabeled data
+    """
+    num_labeled = x_labeled.shape[0]
+    if num_labeled >= num_unlabel:
+        return x_labeled, y_labeled, np.ones(num_labeled, dtype=np.int32)
+    
+    num_pad = num_unlabel - num_labeled # number of padded samples
+    # randomly sample from labeled data to pad after labeled data
+    idx = np.random.choice(np.arange(num_labeled), num_pad, replace=True)
+    x_labeled = np.vstack([x_labeled, x_labeled[idx]])
+    y_labeled = np.hstack([y_labeled, y_labeled[idx]])
+
+    # construct labelbed mask
+    labeled_mask = np.hstack([np.ones(num_labeled, dtype=np.int32), np.zeros(num_pad, dtype=np.int32)])
+
+    return x_labeled, y_labeled, labeled_mask

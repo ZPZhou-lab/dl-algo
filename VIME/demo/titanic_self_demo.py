@@ -41,10 +41,10 @@ if __name__ == "__main__":
     )
 
     # create estimator
-    estimator = VIMESelfEstimator(model_dir="./model_titanic",params=params)
+    estimator = VIMESelfEstimator(model_dir="./titanic_self_model",params=params)
 
     # train
-    num_epochs = 3
+    num_epochs = 5
     for i in range(num_epochs):
         # TRAIN
         train_res = estimator.train(input_fn=train_input_fn, steps=100)
@@ -54,8 +54,8 @@ if __name__ == "__main__":
     # PREDICT
     # get encoded latent representation
     print("get latent representation...")
-    x_latent_train = utils.get_latent_representation(x_train, estimator)
-    x_latent_valid = utils.get_latent_representation(x_valid, estimator)
+    x_latent_train = utils.get_latent_representation(estimator, x={"X_unlabel": x_train})["latent"]
+    x_latent_valid = utils.get_latent_representation(estimator, x={"X_unlabel": x_valid})["latent"]
 
     # build classifier with latent feature
     print("build classifier with latent feature...")
@@ -67,4 +67,4 @@ if __name__ == "__main__":
     print("valid acc using latent feature: %.4f"%(valid_acc))
 
     # plot latent feature
-    utils.plot_latent_representation(x_latent_train, y_train)
+    utils.plot_latent_representation(x_latent_train, y_train, "./latent_representation_self.png")

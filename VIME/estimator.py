@@ -3,6 +3,29 @@ from typing import Callable, Union, Any, Tuple
 import utils
 from model import Encoder, VIMESelf, VIMESemi
 
+import logging
+tf.logging.set_verbosity(tf.logging.INFO)
+logger = tf.get_logger()
+logger.propagate = False
+
+def get_encoder_obj(encoder : Union[tf.keras.Model, str], encoder_params : dict) -> tf.keras.Model:
+    # if encoder checkpoint is provided, load from path
+    if isinstance(encoder, str):
+        ckpt_path = encoder
+        # create encoder object
+        with tf.variable_scope("encoder"):
+            encoder = Encoder(**encoder_params)
+            encoder.build(input_shape=(None, encoder_params["num_dims"]))
+
+        # load encoder checkpoint
+        saver = tf.train.Saver(var_list=encoder.variables)
+
+        with tf.Session() as sess:
+            # restore encoder checkpoint
+            saver.restore(sess, ckpt_path)
+    
+    return encoder
+
 # Self-supervised Learning Estimator
 class VIMESelfEstimator(tf.estimator.Estimator):
     """
@@ -59,24 +82,24 @@ class VIMESelfEstimator(tf.estimator.Estimator):
         
         # define encoder
         with tf.variable_scope("encoder"):
-            self.encoder = Encoder(
+            encoder = Encoder(
                 num_dims=params["num_dims"], latent_sz=params["latent_sz"], cat_cols=cat_cols, 
                 cat_embed_dims=params.get("cat_embed_dims",1), dropout=params.get("dropout", 0.0))
-            self.encoder.build(input_shape=(None, params["num_dims"]))
+            encoder.build(input_shape=(None, params["num_dims"]))
+        
         # define VIMESelf model
-        self.vime_self = VIMESelf(num_dims=params["num_dims"], cat_cols=cat_cols)
+        vime_self = VIMESelf(encoder=encoder, num_dims=params["num_dims"], cat_cols=cat_cols)
 
         # create corrupted data
         mask = utils.mask_generator(params["p_m"], X_unlabel)
         X_tilde, mask_tilde = utils.pretext_generator(mask, X_unlabel, params["num_dims"])
-        X_tilde_latent = self.encoder(X_tilde)
         
         # estimate mask and original feature (include numerical & categorical) using corrupted data
-        X_num_hat, X_cat_hat, mask_logits = self.vime_self(X_tilde_latent)
+        X_num_hat, X_cat_hat, mask_logits = vime_self(X_tilde)
         
         if mode == tf.estimator.ModeKeys.PREDICT:
             predictions = {
-                "latent": self.encoder(X_unlabel)
+                "latent": vime_self.encode(X_unlabel)
             }
             return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions)
 
@@ -120,14 +143,16 @@ class VIMESemiEstimator(tf.estimator.Estimator):
                 The number of hidden units in encoder.
             task : str, default is `"binary"`
                 The task type, `"binary"`, `"multiclass"` of `"regression"` are supported.
-            VIMESelf : VIMESelf, default is `None`
-                The VIMESelf model. If not given, a new VIMESelf model will be created.
+            encoder : Encoder, default is `None`
+                The encoder model. If `None`, a new encoder model will be created.
             cat_cols : dict, default is `{}`
                 The categorical columns with column index as key and number of categories as value.
             freeze_vime_self : bool, default is `False`
                 Whether to freeze VIMESelf model when training.
             vime_self_warmup : int, default is `0`
                 The number of epochs for VIMESelf model warmup training.
+            add_selfsup_loss : bool, default is `False`
+                Whether to add self-supervised loss in semi-supervised learning.
             cat_embed_dims : int, default is `1`
                 The number of dimensions for categorical embedding.
             dropout : float, default is `0.0`
@@ -155,31 +180,54 @@ class VIMESemiEstimator(tf.estimator.Estimator):
     
     # define estimator logic
     def model_fn(self, features, labels=None, mode=None, params=None):
+        # set learning phase
+        if mode == tf.estimator.ModeKeys.TRAIN:
+            tf.keras.backend.set_learning_phase(True)
+        else:
+            tf.keras.backend.set_learning_phase(False)
+        
         # fetch input data
         X_unlabel = features["X_unlabel"]
-        X_label, y_label = features["X_label"], labels["y_label"]
+        X_label = features["X_label"]
+        if labels:
+            y_label, label_mask = labels["y_label"], labels["label_mask"]
+        
         cat_cols = params.get("cat_cols", {})
         task = params.get("task", "binary")
 
-        # create model
-        vime_semi = VIMESemi(
-            num_dims=params["num_dims"], output_dims=params["output_dims"], vime_self=params["VIMESelf"],
-            cat_cols=cat_cols, latent_sz=params["latent_sz"],
-            cat_embed_dims=params.get("cat_embed_dims",1), dropout=params.get("dropout", 0.0))
-        
-        # whether to freeze VIMESelf model
-        vime_semi.freeze_vime_self = params.get("freeze_vime_self", False)
-        # if vime_self_warmup > 0, train VIMESelf model for several at the beginning
+        # whether to train VIMESelf model
+        freeze_vime_self = params.get("freeze_vime_self", False)
+        add_selfsup_loss = params.get("add_selfsup_loss", False)
         vime_self_warmup = params.get("vime_self_warmup", 0)
-        if vime_self_warmup > 0:
-            vime_semi.vime_self.trainable = True
 
-        # set training flag
-        training = (mode == tf.estimator.ModeKeys.TRAIN)
+        # if encoder is provided
+        encoder_params = utils.create_encoder_params(params)
+        if params.get("encoder", None) is not None:
+            # use pre-defined encoder
+            encoder = get_encoder_obj(params["encoder"], encoder_params)
+        else:
+            # create encoder
+            with tf.variable_scope("encoder"):
+                encoder = Encoder(**encoder_params)
+                encoder.build(input_shape=(None, params["num_dims"]))
+            
+            # encoder created new, make sure train it first
+            vime_self_warmup = 100 if vime_self_warmup == 0 else vime_self_warmup
+        
+        # create VIMESelf model
+        vime_self = VIMESelf(encoder=encoder, num_dims=params["num_dims"], cat_cols=cat_cols)
+        # create VIMESemi model
+        vime_semi = VIMESemi(num_dims=params["num_dims"], output_dims=params["output_dims"], dropout=params.get("dropout", 0.0))
+        
+        # if vime_self_warmup > 0, do not freeze VIMESelf model
+        if vime_self_warmup > 0:
+            freeze_vime_self = False
+        vime_self.trainable = not freeze_vime_self
+        vime_self.encoder.trainable = not freeze_vime_self
         
         # make prediction for label data
-        z_label = vime_semi.encode(X_label, training=training)
-        y_hat = vime_semi(X_label, training=training)
+        z_label = vime_self.encode(X_label)
+        y_hat = vime_semi(z_label)
 
         if mode == tf.estimator.ModeKeys.PREDICT:
             predictions = {
@@ -188,59 +236,75 @@ class VIMESemiEstimator(tf.estimator.Estimator):
             }
             return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions)
         
-        # use different training logic according to global step and vime_self_warmup
-        global_step = tf.train.get_global_step()
-        if global_step is not None and global_step < vime_self_warmup:
+        # define self-supervised learning warmup logic
+        def vime_self_warmup_logic():
             # train VIMESelf model
             loss_total = utils.build_selfsupervised_loss(
-                vime_semi.vime_self, X_unlabel, 
-                params.get("p_m", 0.2), params.get("alpha", 1.0), training=training)
+                vime_self, X_unlabel, params.get("p_m", 0.2), params.get("alpha", 1.0))
             
-            if mode == tf.estimator.ModeKeys.TRAIN:
-                # define optimizer and training operator
-                optimizer = tf.train.AdamOptimizer(learning_rate=params["learning_rate"])
-                train_op = optimizer.minimize(loss_total, global_step=tf.train.get_global_step())
-            
-                return tf.estimator.EstimatorSpec(mode=mode, loss=loss_total, train_op=train_op)
-            elif mode == tf.estimator.ModeKeys.EVAL:
-                eval_metric_ops = {
-                    "loss_self": tf.metrics.mean(loss_total)
-                }
-                return tf.estimator.EstimatorSpec(mode=mode, loss=loss_total, eval_metric_ops=eval_metric_ops)
-        else:
-            # control whether to train VIMESelf model after warmup
-            vime_semi.vime_self.trainable = not vime_semi.freeze_vime_self
+            loss_sup = utils.build_supervised_loss(y_label, y_hat, label_mask, task=task)
 
+            # define eval metric
+            eval_metric_ops = {
+                "loss_total": tf.metrics.mean(loss_total),
+                "loss_sup": tf.metrics.mean(loss_sup),
+                "loss_unsup": tf.metrics.mean(tf.constant(0.0)),
+                "loss_self": tf.metrics.mean(loss_total)
+            }
+
+            return loss_total, eval_metric_ops
+
+        # define semi-supervised learning logic
+        def vime_semi_logic():
             # calculate loss
             # part 1: supervised loss
-            loss_sup = utils.build_supervised_loss(y_label, y_hat, task=task)
+            loss_sup = utils.build_supervised_loss(y_label, y_hat, label_mask, task=task)
             # part 2: unsupervised loss (cosistency regularization)
             loss_unsup = utils.build_unsupervised_loss(
-                X_unlabel, vime_semi, 
-                params.get("K", 10), params.get("p_m", 0.2), training=training)
+                vime_semi, vime_self.encoder, X_unlabel, params.get("K", 10), params.get("p_m", 0.2))
             loss_total = loss_sup + params.get("beta", 1.0) * loss_unsup
 
+            # define eval metric
+            eval_metric_ops = {
+                "loss_total": tf.metrics.mean(loss_total),
+                "loss_sup": tf.metrics.mean(loss_sup),
+                "loss_unsup": tf.metrics.mean(params.get("beta", 1.0) * loss_unsup),
+                "loss_self": tf.metrics.mean(tf.constant(0.0))
+            }
+
             # part 3: Self-supervised loss
-            if not vime_semi.freeze_vime_self:
+            if add_selfsup_loss:
                 loss_self = utils.build_selfsupervised_loss(
-                    vime_semi.vime_self, X_unlabel, 
-                    params.get("p_m", 0.2), params.get("alpha", 1.0), training=training)
+                    vime_self, X_unlabel, params.get("p_m", 0.2), params.get("alpha", 1.0))
                 loss_total += params.get("gamma", 1.0) * loss_self
-            
-            if mode == tf.estimator.ModeKeys.TRAIN:
-                # define optimizer and training operator
-                optimizer = tf.train.AdamOptimizer(learning_rate=params["learning_rate"])
-                train_op = optimizer.minimize(loss_total, global_step=tf.train.get_global_step())
                 
-                return tf.estimator.EstimatorSpec(mode=mode, loss=loss_total, train_op=train_op)
+                # update eval metric
+                eval_metric_ops["loss_total"] = tf.metrics.mean(loss_total)
+                eval_metric_ops["loss_self"] = tf.metrics.mean(params.get("gamma", 1.0) * loss_self)
+
+            return loss_total, eval_metric_ops
+        
+        # use different training strategy according to global_step
+        global_step = tf.train.get_global_step()
+        loss_total, eval_metric_ops = tf.cond(
+            tf.greater(global_step, vime_self_warmup), 
+            vime_semi_logic, 
+            vime_self_warmup_logic
+        )
+
+        # create train_op
+        if mode == tf.estimator.ModeKeys.TRAIN:
+            # define optimizer and training operator
+            optimizer = tf.train.AdamOptimizer(learning_rate=params["learning_rate"])
+            # get trainable variables according to freeze_vime_self
+            if freeze_vime_self:
+                var_list = vime_semi.trainable_variables
+            else:
+                var_list = None
             
-            elif mode == tf.estimator.ModeKeys.EVAL:
-                eval_metric_ops = {
-                    "loss_sup": tf.metrics.mean(loss_sup),
-                    "loss_unsup": tf.metrics.mean(loss_unsup),
-                    "loss_total": tf.metrics.mean(loss_total)
-                }
-                if not vime_semi.freeze_vime_self:
-                    eval_metric_ops["loss_self"] = tf.metrics.mean(loss_self)
-                
-                return tf.estimator.EstimatorSpec(mode=mode, loss=loss_total, eval_metric_ops=eval_metric_ops)
+            train_op = optimizer.minimize(loss_total, global_step=tf.train.get_global_step(), var_list=var_list)
+            
+            return tf.estimator.EstimatorSpec(mode=mode, loss=loss_total, train_op=train_op)
+
+        elif mode == tf.estimator.ModeKeys.EVAL:            
+            return tf.estimator.EstimatorSpec(mode=mode, loss=loss_total, eval_metric_ops=eval_metric_ops)
