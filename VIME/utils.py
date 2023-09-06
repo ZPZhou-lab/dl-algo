@@ -5,8 +5,6 @@ from tensorflow.keras.losses import mean_squared_error, sparse_categorical_cross
 from sklearn.preprocessing import OrdinalEncoder, MinMaxScaler
 from sklearn.model_selection import train_test_split
 from sklearn.datasets import fetch_openml
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
 
 from matplotlib import pyplot as plt
 import seaborn as sns
@@ -333,3 +331,29 @@ def pad_labeled_data(x_labeled : np.ndarray, y_labeled : np.ndarray, num_unlabel
     labeled_mask = np.hstack([np.ones(num_labeled, dtype=np.int32), np.zeros(num_pad, dtype=np.int32)])
 
     return x_labeled, y_labeled, labeled_mask
+
+def calculate_task_metric(y_true : tf.Tensor, y_pred : tf.Tensor, label_mask : tf.Tensor, task : str):
+    """
+    Calculate the task metric for supervised learning.
+    """
+    if task == "multiclass":
+        # y_true : (batch_sz, )
+        # y_pred : (batch_sz, num_classes)
+        y_true = tf.cast(y_true, tf.int32)
+        y_pred = tf.argmax(y_pred, axis=-1, output_type=tf.int32)
+        metric = tf.metrics.accuracy(y_true, y_pred, weights=label_mask)
+    elif task == "regression":
+        # y_true : (batch_sz, )
+        # y_pred : (batch_sz, 1)
+        y_true = tf.reshape(y_true, tf.shape(y_pred))
+        metric = tf.metrics.mean_squared_error(y_true, y_pred, weights=label_mask)
+    elif task == "binary":
+        # y_true : (batch_sz, )
+        # y_pred : (batch_sz, 1)
+        y_true = tf.reshape(y_true, tf.shape(y_pred))
+        y_pred = tf.nn.sigmoid(y_pred)
+        metric = tf.metrics.auc(y_true, y_pred, weights=label_mask)
+    else:
+        raise ValueError("task must be one of 'multiclass', 'regression', 'binary'.")
+
+    return metric

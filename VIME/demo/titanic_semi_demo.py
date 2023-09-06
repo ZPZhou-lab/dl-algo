@@ -10,8 +10,7 @@ import numpy as np
 import sys
 sys.path.append("../")
 
-from estimator import VIMESemiEstimator, VIMESelfEstimator
-from model import VIMESelf, Encoder
+from estimator import VIMESemiEstimator
 import utils
 
 def sigmoid(x):

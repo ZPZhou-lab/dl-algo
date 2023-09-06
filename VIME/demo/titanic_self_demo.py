@@ -1,6 +1,6 @@
 import tensorflow as tf
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import roc_auc_score
 
 # add parent path to sys.path at runtime
 # so that we can import modules under VIME/
@@ -61,10 +61,10 @@ if __name__ == "__main__":
     print("build classifier with latent feature...")
     model = RandomForestClassifier(n_jobs=-1, min_samples_leaf=16)
     model.fit(x_latent_train, y_train)
-    train_acc = accuracy_score(y_train, model.predict(x_latent_train))
-    valid_acc = accuracy_score(y_valid, model.predict(x_latent_valid))
-    print("train acc using latent feature: %.4f"%(train_acc))
-    print("valid acc using latent feature: %.4f"%(valid_acc))
+    train_auc = roc_auc_score(y_train, model.predict_proba(x_latent_train)[:,1])
+    valid_auc = roc_auc_score(y_valid, model.predict_proba(x_latent_valid)[:,1])
+    print("train auc using latent feature: %.4f"%(train_auc))
+    print("valid auc using latent feature: %.4f"%(valid_auc))
 
     # plot latent feature
     utils.plot_latent_representation(x_latent_train, y_train, "./latent_representation_self.png")

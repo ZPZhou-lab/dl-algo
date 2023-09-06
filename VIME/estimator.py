@@ -120,7 +120,8 @@ class VIMESelfEstimator(tf.estimator.Estimator):
         elif mode == tf.estimator.ModeKeys.EVAL:
             mask_hat = tf.cast(tf.greater(mask_logits, tf.constant(0.0)), tf.int32)
             eval_metric_ops = {
-                "mask_acc": tf.metrics.accuracy(mask_tilde, mask_hat)
+                "mask_acc": tf.metrics.accuracy(mask_tilde, mask_hat),
+                "loss_total": tf.metrics.mean(loss_total)
             }
             return tf.estimator.EstimatorSpec(mode=mode, loss=loss_total, eval_metric_ops=eval_metric_ops)
 
@@ -249,7 +250,8 @@ class VIMESemiEstimator(tf.estimator.Estimator):
                 "loss_total": tf.metrics.mean(loss_total),
                 "loss_sup": tf.metrics.mean(loss_sup),
                 "loss_unsup": tf.metrics.mean(tf.constant(0.0)),
-                "loss_self": tf.metrics.mean(loss_total)
+                "loss_self": tf.metrics.mean(loss_total),
+                "task_metric": tf.metrics.mean(tf.constant(0.0))
             }
 
             return loss_total, eval_metric_ops
@@ -264,12 +266,16 @@ class VIMESemiEstimator(tf.estimator.Estimator):
                 vime_semi, vime_self.encoder, X_unlabel, params.get("K", 10), params.get("p_m", 0.2))
             loss_total = loss_sup + params.get("beta", 1.0) * loss_unsup
 
+            # calculate task metric
+            task_metric = utils.calculate_task_metric(y_label, y_hat, label_mask, task=task)
+
             # define eval metric
             eval_metric_ops = {
                 "loss_total": tf.metrics.mean(loss_total),
                 "loss_sup": tf.metrics.mean(loss_sup),
                 "loss_unsup": tf.metrics.mean(params.get("beta", 1.0) * loss_unsup),
-                "loss_self": tf.metrics.mean(tf.constant(0.0))
+                "loss_self": tf.metrics.mean(tf.constant(0.0)),
+                "task_metric": task_metric
             }
 
             # part 3: Self-supervised loss
